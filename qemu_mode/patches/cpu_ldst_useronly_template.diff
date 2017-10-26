@@ -1,0 +1,22 @@
+--- qemu-2.3.0/include/exec/cpu_ldst_useronly_template.h.orig	2017-10-26 06:14:21.000192080 +0000
++++ qemu-2.3.0/include/exec/cpu_ldst_useronly_template.h	2017-10-26 06:14:16.456193771 +0000
+@@ -50,10 +50,18 @@
+ #define RES_TYPE uint32_t
+ #endif
+ 
++extern uint16_t sent_codesz;
++extern uint8_t *sent_code;
++extern target_ulong sent_code_pc;
++
+ static inline RES_TYPE
+ glue(glue(cpu_ld, USUFFIX), MEMSUFFIX)(CPUArchState *env, target_ulong ptr)
+ {
+-    return glue(glue(ld, USUFFIX), _p)(g2h(ptr));
++    if (sent_codesz && sent_code)
++        /* FIXME: check whether ptr - sent_code_pc < sent_codesz */
++        return glue(glue(ld, USUFFIX), _p)(sent_code + (ptr - sent_code_pc));
++    else
++        return glue(glue(ld, USUFFIX), _p)(g2h(ptr));
+ }
+ 
+ #if DATA_SIZE <= 2

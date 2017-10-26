@@ -39,7 +39,7 @@
    overhead in the next forked-off copy). */
 
 #define AFL_QEMU_CPU_SNIPPET1 do { \
-    afl_request_tsl(pc, cs_base, flags); \
+    afl_request_tsl(pc, cs_base, flags, tb); \
   } while (0)
 
 /* This snippet kicks in when the instruction pointer is positioned at
@@ -85,7 +85,7 @@ static void afl_forkserver(CPUArchState*);
 static inline void afl_maybe_log(abi_ulong);
 
 static void afl_wait_tsl(CPUArchState*, int);
-static void afl_request_tsl(target_ulong, target_ulong, uint64_t);
+static void afl_request_tsl(target_ulong, target_ulong, uint64_t, TranslationBlock*);
 
 static TranslationBlock *tb_find_slow(CPUArchState*, target_ulong,
                                       target_ulong, uint64_t);
@@ -97,8 +97,12 @@ struct afl_tsl {
   target_ulong pc;
   target_ulong cs_base;
   uint64_t flags;
+  uint16_t codesz;
 };
 
+uint16_t sent_codesz;        /* length of the basic block */
+uint8_t *sent_code;          /* content of the basic block */
+target_ulong *sent_code_pc;  /* pc of the basic block */
 
 /*************************
  * ACTUAL IMPLEMENTATION *
@@ -254,7 +258,7 @@ static inline void afl_maybe_log(abi_ulong cur_loc) {
    we tell the parent to mirror the operation, so that the next fork() has a
    cached copy. */
 
-static void afl_request_tsl(target_ulong pc, target_ulong cb, uint64_t flags) {
+static void afl_request_tsl(target_ulong pc, target_ulong cb, uint64_t flags, TranslationBlock *tb) {
 
   struct afl_tsl t;
 
@@ -263,8 +267,21 @@ static void afl_request_tsl(target_ulong pc, target_ulong cb, uint64_t flags) {
   t.pc      = pc;
   t.cs_base = cb;
   t.flags   = flags;
+  t.codesz  = tb->size;
 
-  if (write(TSL_FD, &t, sizeof(struct afl_tsl)) != sizeof(struct afl_tsl))
+  /* The parent doesn't necessarily have the code the child has been
+   * translating. Therefore we send it to the parent.
+   *
+   * TODO: if tb was already in the cache, then the parent will probably
+   *       also have it in their cache. In this case, we can just set
+   *       tb->size to 0.
+   */
+  size_t send_length = sizeof(struct afl_tsl) + t.codesz;
+  char msg[send_length];
+  memcpy(msg, &t, sizeof(struct afl_tsl));
+  memcpy(msg + sizeof(struct afl_tsl), (void*) guest_base + pc, t.codesz);
+
+  if (write(TSL_FD, msg, send_length) != send_length)
     return;
 
 }
@@ -284,8 +301,19 @@ static void afl_wait_tsl(CPUArchState *env, int fd) {
     if (read(fd, &t, sizeof(struct afl_tsl)) != sizeof(struct afl_tsl))
       break;
 
-    tb_find_slow(env, t.pc, t.cs_base, t.flags);
+    sent_codesz = t.codesz;
+    sent_code = NULL;
 
+    if (sent_codesz) {
+      uint8_t code[sent_codesz];
+      if (read(fd, code, sent_codesz) != sent_codesz)
+        break;
+      sent_code = code;
+      sent_code_pc = t.pc;
+    }
+
+    tb_find_slow(env, t.pc, t.cs_base, t.flags);
+    sent_code = NULL;
   }
 
   close(fd);
